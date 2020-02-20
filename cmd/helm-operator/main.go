@@ -268,7 +268,7 @@ func main() {
 
 	rel := release.New(
 		log.With(logger, "component", "release"),
-		kubeClient.CoreV1(),
+		cfg,
 		ifClient.HelmV1(),
 		gitChartSync,
 		release.Config{LogDiffs: *logReleaseDiffs, UpdateDeps: *updateDependencies},

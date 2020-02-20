@@ -9,8 +9,9 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/google/go-cmp/cmp"
 
+
 	corev1 "k8s.io/api/core/v1"
-	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
 
 	v1 "github.com/fluxcd/helm-operator/pkg/apis/helm.fluxcd.io/v1"
 	"github.com/fluxcd/helm-operator/pkg/chartsync"
@@ -61,18 +62,18 @@ func (c Config) WithDefaults() Config {
 // and provides the methods to perform a sync or uninstall.
 type Release struct {
 	logger            log.Logger
-	coreV1Client      corev1client.CoreV1Interface
+	kubeConfig        *rest.Config
 	helmReleaseClient v1client.HelmV1Interface
 	gitChartSync      *chartsync.GitChartSync
 	config            Config
 }
 
-func New(logger log.Logger, coreV1Client corev1client.CoreV1Interface, helmReleaseClient v1client.HelmV1Interface,
+func New(logger log.Logger, kubeConfig *rest.Config, helmReleaseClient v1client.HelmV1Interface,
 	gitChartSync *chartsync.GitChartSync, config Config) *Release {
 
 	r := &Release{
 		logger:            logger,
-		coreV1Client:      coreV1Client,
+		kubeConfig:        kubeConfig,
 		helmReleaseClient: helmReleaseClient,
 		gitChartSync:      gitChartSync,
 		config:            config.WithDefaults(),
@@ -170,7 +171,7 @@ func (r *Release) Sync(client helm.Client, hr *v1.HelmRelease) (rHr *v1.HelmRele
 
 	// Compose the values from the sources and values defined in the
 	// `v1.HelmRelease` resource.
-	composedValues, err := composeValues(r.coreV1Client, hr, chartPath)
+	composedValues, err := composeValues(r.kubeConfig, hr, chartPath)
 	if err != nil {
 		_ = status.SetCondition(r.helmReleaseClient.HelmReleases(hr.Namespace), hr, status.NewCondition(
 			v1.HelmReleaseReleased, corev1.ConditionFalse, failReason, ErrComposingValues.Error()))
@@ -178,7 +179,7 @@ func (r *Release) Sync(client helm.Client, hr *v1.HelmRelease) (rHr *v1.HelmRele
 		return hr, ErrComposingValues
 	}
 
-	ok, diff, err := shouldSync(logger, client, hr, curRel, chartPath, revision, composedValues, r.config.LogDiffs)
+	ok, diff, err := shouldSync(logger, r.kubeConfig, client, hr, curRel, chartPath, composedValues, r.config.LogDiffs)
 	if !ok {
 		if err != nil {
 			_ = status.SetCondition(r.helmReleaseClient.HelmReleases(hr.Namespace), hr, status.NewCondition(
@@ -291,7 +292,7 @@ func (r *Release) Sync(client helm.Client, hr *v1.HelmRelease) (rHr *v1.HelmRele
 		err = ErrRolledBack
 	}
 
-	annotateResources(logger, rel, hr.ResourceID())
+	annotateWithResourceID(logger, r.kubeConfig, rel, hr.ResourceID())
 
 	return hr, err
 }
@@ -321,8 +322,8 @@ func (r *Release) Uninstall(client helm.Client, hr *v1.HelmRelease) {
 // determine if any undefined mutations have occurred. It returns two
 // booleans indicating if the release should be synced and if the reason
 // it should happen is because of a diff, or an error.
-func shouldSync(logger log.Logger, client helm.Client, hr *v1.HelmRelease, curRel *helm.Release,
-	chartPath, revision string, values helm.Values, logDiffs bool) (bool, bool, error) {
+func shouldSync(logger log.Logger, kubeConfig *rest.Config, client helm.Client, hr *v1.HelmRelease, curRel *helm.Release,
+	chartPath string, values helm.Values, logDiffs bool) (bool, bool, error) {
 
 	// Without valid YAML we will not get anywhere, return early.
 	b, err := values.YAML()
@@ -336,8 +337,15 @@ func shouldSync(logger log.Logger, client helm.Client, hr *v1.HelmRelease, curRe
 		return true, false, nil
 	}
 
+	// Check if the release is managed by our resource
+	managedBy, resourceID, err := annotatedWithResourceID(kubeConfig, curRel, hr.ResourceID())
+	// If an error is returned and we were unable to determine ownership,
+	// we return the error (and skip) to avoid conflicts.
+	if err != nil {
+		return false, false, err
+	}
 	// If the release is not managed by our resource, we skip to avoid conflicts.
-	if ok, resourceID := managedByHelmRelease(curRel, *hr); !ok {
+	if !managedBy {
 		logger.Log("warning", "release appears to be managed by "+resourceID, "action", "skip")
 		return false, false, nil
 	}

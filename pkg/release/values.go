@@ -7,22 +7,27 @@ import (
 	"net/url"
 	"path/filepath"
 
-	"github.com/fluxcd/helm-operator/pkg/helm"
 	"github.com/ghodss/yaml"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"github.com/fluxcd/helm-operator/pkg/apis/helm.fluxcd.io/v1"
+	"github.com/fluxcd/helm-operator/pkg/helm"
 )
 
 // values attempts to compose the final values for the given
 // `HelmRelease`. It returns the values as bytes and a checksum,
 // or an error in case anything went wrong.
-func composeValues(coreV1Client corev1.CoreV1Interface, hr *v1.HelmRelease, chartPath string) (helm.Values, error) {
+func composeValues(kubeConfig *rest.Config, hr *v1.HelmRelease, chartPath string) (helm.Values, error) {
 	result := helm.Values{}
-
+	client, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		return result, err
+	}
+	
 	for _, v := range hr.GetValuesFromSources() {
 		var valueFile helm.Values
 		ns := hr.Namespace
@@ -39,7 +44,7 @@ func composeValues(coreV1Client corev1.CoreV1Interface, hr *v1.HelmRelease, char
 				key = "values.yaml"
 			}
 			optional := cm.Optional != nil && *cm.Optional
-			configMap, err := coreV1Client.ConfigMaps(ns).Get(name, metav1.GetOptions{})
+			configMap, err := client.CoreV1().ConfigMaps(ns).Get(name, metav1.GetOptions{})
 			if err != nil {
 				if errors.IsNotFound(err) && optional {
 					continue
@@ -70,7 +75,7 @@ func composeValues(coreV1Client corev1.CoreV1Interface, hr *v1.HelmRelease, char
 				key = "values.yaml"
 			}
 			optional := s.Optional != nil && *s.Optional
-			secret, err := coreV1Client.Secrets(ns).Get(name, metav1.GetOptions{})
+			secret, err := client.CoreV1().Secrets(ns).Get(name, metav1.GetOptions{})
 			if err != nil {
 				if errors.IsNotFound(err) && optional {
 					continue
